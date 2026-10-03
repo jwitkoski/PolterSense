@@ -1,4 +1,4 @@
-// Shared color helpers for rooms and devices
+// Shared color helpers for rooms
 // - Honors explicit room.color from config when present
 // - Deterministically assigns colors for unspecified rooms using a stable palette
 
@@ -72,26 +72,11 @@ export function getRoomColor(config: Config | null | undefined, roomId: string |
 	for (const floor of config.floors ?? []) {
 		for (const room of floor.rooms ?? []) {
 			if (room.id === roomId) {
-				const explicit = normalizeHex((room as any).color);
+				const explicit = normalizeHex(room.color);
 				return explicit ?? fallback;
 			}
 		}
 	}
 
 	return fallback;
-}
-
-/**
- * Converts a hex color string (e.g., `#RRGGBB` or `#RRGGBBAA`) to a 24-bit RGB number.
- *
- * Accepts strings starting with `#` and length 7 or 9. If input is invalid, returns white (`0xffffff`).
- *
- * @param color - Hex color string to convert.
- * @returns The integer RGB value parsed from the first six hex digits (0xRRGGBB), or `0xffffff` for invalid input.
- */
-export function hexToThreeNumber(color: string): number {
-	if (!color || color[0] !== '#' || (color.length !== 7 && color.length !== 9)) {
-		return 0xffffff;
-	}
-	return parseInt(color.slice(1, 7), 16);
 }

@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 1,
+  "id": "fictional-house-echo-1",
+  "provenance": "synthetic",
+  "fixture": "synthetic-echo.json",
+  "configRevision": "8df08321f2a006739852413438427ba6d64aded2ad98c69172bb9d2ed86d1046",
+  "scene": {
+    "schemaVersion": 1,
+    "name": "Fictional Lantern House",
+    "map": {
+      "flipX": false,
+      "flipY": true,
+      "wallThickness": 0.1,
+      "wallColor": "#64748b",
+      "wallOpacity": 0.5
+    },
+    "floors": [
+      {
+        "id": "ground",
+        "name": "Ground floor",
+        "elevation": 0,
+        "bounds": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            8,
+            6,
+            3
+          ]
+        ],
+        "rooms": [
+          {
+            "id": "studio",
+            "name": "Studio",
+            "points": [
+              [
+                0,
+                0
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                4,
+                6
+              ],
+              [
+                0,
+                6
+              ]
+            ],
+            "color": "#93c5fd"
+          },
+          {
+            "id": "kitchen",
+            "name": "Kitchen",
+            "points": [
+              [
+                4,
+                0
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                6
+              ],
+              [
+                4,
+                6
+              ]
+            ],
+            "color": "#86efac"
+          }
+        ]
+      },
+      {
+        "id": "upper",
+        "name": "Upper floor",
+        "elevation": 3,
+        "bounds": [
+          [
+            0,
+            0,
+            3
+          ],
+          [
+            8,
+            6,
+            6
+          ]
+        ],
+        "rooms": [
+          {
+            "id": "loft",
+            "name": "Loft",
+            "points": [
+              [
+                0,
+                0
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                6
+              ],
+              [
+                0,
+                6
+              ]
+            ],
+            "color": "#c4b5fd"
+          }
+        ]
+      }
+    ],
+    "wisps": [
+      {
+        "id": "wisp-studio",
+        "name": "Studio receiver",
+        "externalId": null,
+        "point": [
+          1,
+          1,
+          1.5
+        ],
+        "floors": [
+          "ground"
+        ],
+        "orientation": null
+      },
+      {
+        "id": "wisp-loft",
+        "name": "Loft receiver",
+        "externalId": null,
+        "point": [
+          6,
+          4,
+          4.5
+        ],
+        "floors": [
+          "upper"
+        ],
+        "orientation": null
+      }
+    ],
+    "sources": [
+      {
+        "id": "source-ground",
+        "name": "Demonstration ground radio",
+        "apLabel": "Fictional AP downstairs",
+        "radioId": null,
+        "bssid": null,
+        "channel": null,
+        "point": [
+          4,
+          3,
+          2.5
+        ],
+        "floors": [
+          "ground"
+        ],
+        "orientation": null
+      },
+      {
+        "id": "source-upper",
+        "name": "Demonstration upper radio",
+        "apLabel": "Fictional AP upstairs",
+        "radioId": null,
+        "bssid": null,
+        "channel": null,
+        "point": [
+          4,
+          3,
+          5.5
+        ],
+        "floors": [
+          "upper"
+        ],
+        "orientation": null
+      }
+    ],
+    "links": [
+      {
+        "id": "link-studio",
+        "name": "Ground radio to studio receiver",
+        "wispId": "wisp-studio",
+        "sourceId": "source-ground"
+      },
+      {
+        "id": "link-loft",
+        "name": "Upper radio to loft receiver",
+        "wispId": "wisp-loft",
+        "sourceId": "source-upper"
+      }
+    ]
+  },
+  "observations": [
+    {
+      "schemaVersion": 1,
+      "kind": "motion",
+      "kindVersion": 1,
+      "wispId": "wisp-studio",
+      "sourceId": "source-ground",
+      "linkId": "link-studio",
+      "configRevision": "8df08321f2a006739852413438427ba6d64aded2ad98c69172bb9d2ed86d1046",
+      "sessionId": "synthetic-session-1",
+      "sequence": 0,
+      "timing": {
+        "acquiredAt": "2026-01-01T00:00:00Z",
+        "deviceTimeMs": 0,
+        "clockBasis": "reportedUtc"
+      },
+      "firmware": null,
+      "observedRadio": null,
+      "motion": {
+        "motion": false,
+        "score": 0.1
+      },
+      "quality": {
+        "ready": true,
+        "confidence": null,
+        "droppedSamples": null
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "kind": "motion",
+      "kindVersion": 1,
+      "wispId": "wisp-studio",
+      "sourceId": "source-ground",
+      "linkId": "link-studio",
+      "configRevision": "8df08321f2a006739852413438427ba6d64aded2ad98c69172bb9d2ed86d1046",
+      "sessionId": "synthetic-session-1",
+      "sequence": 1,
+      "timing": {
+        "acquiredAt": "2026-01-01T00:00:00Z",
+        "deviceTimeMs": 100,
+        "clockBasis": "reportedUtc"
+      },
+      "firmware": null,
+      "observedRadio": null,
+      "motion": {
+        "motion": true,
+        "score": 0.7
+      },
+      "quality": {
+        "ready": true,
+        "confidence": null,
+        "droppedSamples": null
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "kind": "motion",
+      "kindVersion": 1,
+      "wispId": "wisp-studio",
+      "sourceId": "source-ground",
+      "linkId": "link-studio",
+      "configRevision": "8df08321f2a006739852413438427ba6d64aded2ad98c69172bb9d2ed86d1046",
+      "sessionId": "synthetic-session-1",
+      "sequence": 2,
+      "timing": {
+        "acquiredAt": "2026-01-01T00:00:00Z",
+        "deviceTimeMs": 200,
+        "clockBasis": "reportedUtc"
+      },
+      "firmware": null,
+      "observedRadio": null,
+      "motion": {
+        "motion": false,
+        "score": 0.2
+      },
+      "quality": {
+        "ready": true,
+        "confidence": null,
+        "droppedSamples": null
+      }
+    }
+  ]
+}

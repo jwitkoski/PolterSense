@@ -2,68 +2,33 @@
 	let backgroundImage: string | null = $state(null);
 	let fileInput: HTMLInputElement | undefined = $state();
 	let rotation = $state(0);
-
-	function handleFileUpload(event: Event) {
+	let error = $state('');
+	function upload(event: Event) {
 		const file = (event.target as HTMLInputElement).files?.[0];
-		if (file) {
-			const reader = new FileReader();
-			reader.onload = (e) => {
-				backgroundImage = e.target?.result as string;
-			};
-			reader.readAsDataURL(file);
+		if (!file) return;
+		if (file.size > 8 * 1024 * 1024 || !['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'].includes(file.type)) {
+			error = 'Choose a PNG, JPEG, WebP or SVG under 8 MB.';
+			return;
 		}
-	}
-
-	function handleUploadClick(event: MouseEvent) {
-		event.preventDefault();
-		event.stopPropagation();
-		if (fileInput) {
-			fileInput.click();
-		}
-	}
-
-	function clearBackground(event: MouseEvent) {
-		event.preventDefault();
-		event.stopPropagation();
-		backgroundImage = null;
-		rotation = 0;
-		if (fileInput) {
-			fileInput.value = '';
-		}
-	}
-
-	function rotateBackground(event: MouseEvent) {
-		event.preventDefault();
-		event.stopPropagation();
-		rotation = (rotation + 90) % 360;
+		error = '';
+		const reader = new FileReader();
+		reader.onload = () => {
+			backgroundImage = reader.result as string;
+		};
+		reader.readAsDataURL(file);
 	}
 </script>
 
-<input bind:this={fileInput} type="file" accept=".svg,.png,.jpg,.jpeg" onchange={handleFileUpload} style="display: none;" />
-
-{#if backgroundImage}
-	<div class="fixed inset-0 pointer-events-none" style="z-index: 0;">
-		<img src={backgroundImage} alt="Background" class="w-full h-full object-contain opacity-25 transition-transform duration-300" style="transform: rotate({rotation}deg);" />
-	</div>
-{/if}
-
-<div class="fixed top-4 right-4 flex gap-2" style="z-index: 2;">
-	{#if !backgroundImage}
-		<button type="button" onclick={handleUploadClick} class="bg-blue-500 hover:bg-blue-700 text-white p-2 rounded cursor-pointer" title="Upload Background" aria-label="Upload Background">
-			<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-				<path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd" />
-			</svg>
-		</button>
-	{:else}
-		<button type="button" onclick={rotateBackground} class="bg-blue-500 hover:bg-blue-700 text-white p-2 rounded" title="Rotate Background" aria-label="Rotate Background">
-			<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-				<path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd" />
-			</svg>
-		</button>
-		<button type="button" onclick={clearBackground} class="bg-red-500 hover:bg-red-700 text-white p-2 rounded" title="Clear Background" aria-label="Clear Background">
-			<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-				<path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
-			</svg>
-		</button>
-	{/if}
+{#if backgroundImage}<div class="map-background"><img src={backgroundImage} alt="Local floor plan reference" style={`transform:rotate(${rotation}deg)`} /></div>{/if}
+<div class="background-controls">
+	<input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg" onchange={upload} aria-label="Choose local floor plan background" hidden />
+	<button onclick={() => fileInput?.click()}>Local background</button>
+	{#if backgroundImage}<button onclick={() => (rotation = (rotation + 90) % 360)}>Rotate</button><button
+			onclick={() => {
+				backgroundImage = null;
+				rotation = 0;
+				if (fileInput) fileInput.value = '';
+			}}>Clear</button
+		>{/if}
+	{#if error}<span role="alert">{error}</span>{/if}
 </div>

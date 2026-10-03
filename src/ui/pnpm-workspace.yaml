@@ -1,2 +1,4 @@
-onlyBuiltDependencies:
-  - esbuild
+# esbuild installs and verifies its platform-specific binary. Other dependency
+# install scripts still require explicit approval. Supported by pnpm >=10.26.
+allowBuilds:
+  esbuild: true

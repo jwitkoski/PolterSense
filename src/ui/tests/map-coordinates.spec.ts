@@ -1,26 +1,27 @@
-import { expect, test } from '@playwright/test';
-import { mockApi } from './mock-api';
+import { test, expect } from '@playwright/test';
+import { prepareMap } from './map-fixture';
 
-// The readout is mouse-owned state. It was declared as `$: cursorX = 0`, i.e. derived,
-// which is wrong in intent and left it liable to be reset by a reactive re-run.
-test('coordinate readout tracks the mouse and holds its value', async ({ page }) => {
-	await mockApi(page, { stubWebSocket: true });
+// Retained upstream regression: the readout is mouse-owned state, not derived state.
+test('coordinate readout tracks the mouse and holds its value across live summaries', async ({ page }) => {
+	let frames = 0;
+	page.on('websocket', (socket) => socket.on('framereceived', () => frames++));
+	await prepareMap(page);
 	await page.goto('/');
-
 	const readout = page.getByText(/^X: .*, Y: /);
 	await expect(readout).toBeVisible();
 	await expect(readout).toHaveText('X: 0, Y: 0');
-
-	const svg = page.locator('svg').first();
-	const box = await svg.boundingBox();
-	if (!box) throw new Error('map svg has no box');
-
+	const box = await page.locator('.map-canvas svg').boundingBox();
+	if (!box) throw new Error('map SVG has no box');
 	await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.6);
-
 	await expect(readout).not.toHaveText('X: 0, Y: 0');
 	const moved = await readout.textContent();
-
-	// The value must survive subsequent component updates rather than snapping back to 0.
-	await page.waitForTimeout(1500);
+	const frameAtMove = frames;
+	if (process.env.POLTERSENSE_E2E_URL) await expect.poll(() => frames).toBeGreaterThan(frameAtMove);
+	else {
+		// Mocked route frames are not exposed as network websocket events. Trigger retained
+		// LayerCake resize/repaint updates without moving the cursor instead.
+		await page.setViewportSize({ width: 1180, height: 790 });
+		await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+	}
 	await expect(readout).toHaveText(moved!);
 });

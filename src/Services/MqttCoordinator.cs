@@ -1,812 +1,138 @@
-using System;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-using ESPresense.Events;
-using ESPresense.Extensions;
-using ESPresense.Models;
+using System.Buffers;
 using MQTTnet;
-using MQTTnet.Diagnostics.Logger;
-using Newtonsoft.Json;
+using MQTTnet.Formatter;
+using PolterSense.Sensing;
 
-namespace ESPresense.Services;
+namespace PolterSense.Services;
 
-public class MqttMessageProcessingException : Exception
+// Operational credentials deliberately do not belong to public scene/config snapshots.
+public sealed record MqttSettings(string? Host, int Port, bool Tls, string? Username, string? Password, bool TestInputEnabled, string InstanceId)
 {
-    public string Topic { get; }
-    public string? Payload { get; }
-    public string MessageType { get; }
-
-    public MqttMessageProcessingException(string message, string topic, string? payload, string messageType, Exception? innerException = null)
-        : base(message, innerException)
+    public static MqttSettings FromEnvironment(string storageDirectory)
     {
-        Topic = topic;
-        Payload = payload;
-        MessageType = messageType;
+        Directory.CreateDirectory(storageDirectory);
+        var identityPath = Path.Combine(storageDirectory, "instance-id");
+        if (!File.Exists(identityPath))
+        {
+            try
+            {
+                using var identity = new FileStream(identityPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                identity.Write(System.Text.Encoding.ASCII.GetBytes(Guid.NewGuid().ToString("N")));
+                identity.Flush(true);
+            }
+            catch (IOException) when (File.Exists(identityPath)) { }
+        }
+        var instance = File.ReadAllText(identityPath).Trim();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(instance, "^[a-z0-9-]{1,48}$"))
+            throw new InvalidOperationException("Invalid PolterSense instance identity file");
+        var port = Environment.GetEnvironmentVariable("POLTERSENSE_MQTT_PORT");
+        return new(Environment.GetEnvironmentVariable("POLTERSENSE_MQTT_HOST"),
+            int.TryParse(port, out var parsed) && parsed is > 0 and <= 65535 ? parsed : 1883,
+            Environment.GetEnvironmentVariable("POLTERSENSE_MQTT_TLS") == "true",
+            Environment.GetEnvironmentVariable("POLTERSENSE_MQTT_USERNAME"),
+            Environment.GetEnvironmentVariable("POLTERSENSE_MQTT_PASSWORD"),
+            Environment.GetEnvironmentVariable("POLTERSENSE_TEST_INPUT") == "true", instance);
     }
 }
-
-public class MqttCoordinator : IMqttCoordinator
+public record MqttStatus(string Status, bool TestInputEnabled, string ClientId, string StatusTopic, string TestTopic, long Connections);
+public sealed class MqttCoordinator(MqttSettings settings, ConfigLoader config, ObservationPipeline pipeline,
+    IObservationAdapter adapter, TimeProvider time, ILogger<MqttCoordinator> logger) : BackgroundService
 {
-    private readonly ConfigLoader _cfg;
-    private readonly ILogger<MqttCoordinator> _logger;
-    private readonly IMqttNetLogger _mqttNetLogger;
-    private readonly SupervisorConfigLoader _supervisorConfigLoader;
-    private readonly SemaphoreSlim _initLock = new(1, 1);
-    private readonly SemaphoreSlim _connectionLock = new(1, 1);
-    private readonly object _reconnectSync = new();
-    private IMqttClient? _mqttClient;
-    private Task<IMqttClient>? _initTask;
-    private Task? _reconnectTask;
-    private ConfigMqtt? _lastConfig;
-    private bool _reconnectRequired;
-    private string _discoveryTopic = "homeassistant";
-    private volatile TaskCompletionSource _connectionTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public string ClientId => $"poltersense-{settings.InstanceId}";
+    public string StatusTopic => $"poltersense/{settings.InstanceId}/status";
+    public string TestTopic => $"poltersense/{settings.InstanceId}/test/observations";
+    private string status = "unconfigured";
+    private long connections;
+    public MqttStatus Snapshot() => new(Volatile.Read(ref status), settings.TestInputEnabled, ClientId, StatusTopic, TestTopic, Interlocked.Read(ref connections));
 
-    public string DiscoveryTopic => _discoveryTopic;
-
-    public MqttCoordinator(
-        ConfigLoader cfg,
-        ILogger<MqttCoordinator> logger,
-        IMqttNetLogger mqttNetLogger,
-        SupervisorConfigLoader supervisorConfigLoader)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _cfg = cfg;
-        _logger = logger;
-        _mqttNetLogger = mqttNetLogger;
-        _supervisorConfigLoader = supervisorConfigLoader;
-        _cfg.ConfigChanged += (s, c) =>
+        if (string.IsNullOrWhiteSpace(settings.Host)) return;
+        // Topic and client identity never accept a caller-supplied prefix or legacy identity.
+        if (!System.Text.RegularExpressions.Regex.IsMatch(settings.InstanceId, "^[a-z0-9-]{1,48}$"))
+            throw new InvalidOperationException("Invalid PolterSense instance identifier");
+        using var client = new MqttClientFactory().CreateMqttClient();
+        client.ApplicationMessageReceivedAsync += async args =>
         {
-            var configChanged = ConfigChanged(c.Mqtt);
-            if (configChanged) _logger.LogInformation("MQTT configuration changed");
-            _reconnectRequired |= configChanged;
-        };
-    }
-
-    private bool ConfigChanged(ConfigMqtt? config)
-    {
-        if (config == null) return _lastConfig != null;
-        return _lastConfig != null &&
-             (!string.Equals(_lastConfig.Host, config.Host, StringComparison.OrdinalIgnoreCase) ||
-              _lastConfig.Port != config.Port ||
-              !string.Equals(_lastConfig.Username, config.Username) ||
-              !string.Equals(_lastConfig.Password, config.Password) ||
-              _lastConfig.Ssl != config.Ssl ||
-              !string.Equals(_lastConfig.DiscoveryTopic, config.DiscoveryTopic, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private async Task<ConfigMqtt?> GetUserConfig()
-    {
-        var c = await _cfg.ConfigAsync();
-
-        c.Mqtt ??= new ConfigMqtt();
-
-        return string.IsNullOrEmpty(c.Mqtt.Host) ? null : c.Mqtt;
-    }
-
-    private async Task<IMqttClient> GetClient()
-    {
-        if (_mqttClient != null && !_reconnectRequired)
-        {
-            return _mqttClient;
-        }
-
-        await _initLock.WaitAsync();
-        try
-        {
-            if (_mqttClient != null && !_reconnectRequired)
-            {
-                return _mqttClient;
-            }
-
-            if (_reconnectRequired && _mqttClient != null)
-            {
-                try
-                {
-                    await _mqttClient.DisconnectAsync().ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Error disconnecting MQTT client during reconnection");
-                }
-
-                _mqttClient.Dispose();
-                _mqttClient = null;
-                _initTask = null;
-
-                lock (_reconnectSync)
-                {
-                    _reconnectTask = null;
-                }
-            }
-
-            if (_initTask != null)
-            {
-                if (_initTask.IsFaulted)
-                    _initTask = null;
-                else
-                    return await _initTask.ConfigureAwait(false);
-            }
-
-            _initTask = InitializeClientAsync();
+            if (!settings.TestInputEnabled || args.ApplicationMessage.Topic != TestTopic) return;
             try
             {
-                return await _initTask.ConfigureAwait(false);
+                if (args.ApplicationMessage.Payload.Length > NormalizedTestAdapter.MaxPayloadBytes)
+                { pipeline.Reject("oversized"); return; }
+                var observation = adapter.Decode(args.ApplicationMessage.Payload.ToArray(),
+                    new(time.GetUtcNow(), args.ApplicationMessage.Retain));
+                await pipeline.SubmitAsync(observation, config.Current, stoppingToken);
             }
-            catch
-            {
-                _initTask = null;
-                throw;
-            }
-        }
-        finally
-        {
-            _initLock.Release();
-        }
-    }
-
-    private async Task<IMqttClient> InitializeClientAsync()
-    {
-        var config = await GetUserConfig() ?? await _supervisorConfigLoader.GetSupervisorConfig();
-        if (config == null)
-        {
-            throw new InvalidOperationException("No MQTT server setup, fix your config.yaml");
-        }
-
-        var mqttFactory = new MqttClientFactory(_mqttNetLogger);
-        var mqttClient = mqttFactory.CreateMqttClient();
-
-        mqttClient.ApplicationMessageReceivedAsync += OnMqttMessageReceived;
-
-        mqttClient.ConnectedAsync += async _ =>
-        {
-            _logger.LogInformation("MQTT connected!");
-
-            try
-            {
-                if (!IsReadOnlyClient(config.ClientId))
-                {
-                    await mqttClient.PublishStringAsync("espresense/companion/status", "online").ConfigureAwait(false);
-                }
-
-                await mqttClient.SubscribeAsync("espresense/devices/+/+").ConfigureAwait(false);
-                await mqttClient.SubscribeAsync("espresense/settings/+/config").ConfigureAwait(false);
-                await mqttClient.SubscribeAsync("espresense/rooms/+/+").ConfigureAwait(false);
-                await mqttClient.SubscribeAsync("espresense/rooms/*/+/set").ConfigureAwait(false);
-                await mqttClient.SubscribeAsync($"{config.DiscoveryTopic}/device_tracker/+/config").ConfigureAwait(false);
-                await mqttClient.SubscribeAsync("espresense/companion/+/attributes").ConfigureAwait(false);
-                await mqttClient.SubscribeAsync("espresense/companion/lease/+").ConfigureAwait(false);
-            }
-            catch (MQTTnet.Exceptions.MqttClientNotConnectedException ex)
-            {
-                _logger.LogError(ex, "Error during MQTT post-connection subscription");
-            }
-
-            _connectionTcs.TrySetResult();
+            catch (ObservationException ex) { pipeline.Reject(ex.Code); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+            catch (Exception) { pipeline.Reject("malformed"); }
         };
-
-        mqttClient.DisconnectedAsync += args =>
-        {
-            if (_connectionTcs.Task.IsCompleted)
-                _connectionTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            // Enhanced logging with reason details for troubleshooting connection issues
-            if (args.Exception != null)
-            {
-                _logger.LogWarning(args.Exception,
-                    "MQTT disconnected due to error: {ExceptionType}. Broker: {Broker}",
-                    args.Exception.GetType().Name,
-                    config.Host);
-            }
-            else if (args.Reason != MqttClientDisconnectReason.NormalDisconnection)
-            {
-                _logger.LogWarning("MQTT disconnected with reason: {Reason} ({ReasonCode}). Client was connected: {WasConnected}. Broker: {Broker}",
-                    args.Reason.ToString(),
-                    (int)args.Reason,
-                    args.ClientWasConnected,
-                    config.Host);
-            }
-            else
-            {
-                _logger.LogInformation("MQTT disconnected. Client was connected: {WasConnected}. Broker: {Broker}",
-                    args.ClientWasConnected,
-                    config.Host);
-            }
-
-            if (!_reconnectRequired && args.ClientWasConnected)
-            {
-                StartReconnectLoop(mqttClient);
-            }
-
-            return Task.CompletedTask;
-        };
-
-        mqttClient.ConnectingAsync += _ =>
-        {
-            _logger.LogDebug("MQTT connecting...");
-            return Task.CompletedTask;
-        };
-
-        var mqttClientOptions = new MqttClientOptionsBuilder()
-            .WithConfig(config)
-            .WithClientId(config.ClientId)
-            .WithWillTopic("espresense/companion/status")
-            .WithWillRetain()
-            .WithWillPayload("offline")
-            .WithCleanSession()
-            .WithKeepAlivePeriod(TimeSpan.FromSeconds(30))
-            .Build();
-
-        _logger.LogInformation("Connecting to MQTT at {Host}{Port} as {User}",
-            config.Host,
-            config.Port.HasValue ? ":" + config.Port : "",
-            string.IsNullOrEmpty(config.Username) ? "<anonymous>" : config.Username);
-
-        _mqttClient = mqttClient;
-
+        var options = new MqttClientOptionsBuilder().WithClientId(ClientId)
+            .WithTcpServer(settings.Host, settings.Port).WithProtocolVersion(MqttProtocolVersion.V500)
+            .WithCleanSession().WithKeepAlivePeriod(TimeSpan.FromSeconds(15))
+            .WithTimeout(TimeSpan.FromSeconds(5))
+            .WithWillTopic(StatusTopic).WithWillPayload("offline").WithWillRetain();
+        if (settings.Username != null) options.WithCredentials(settings.Username, settings.Password);
+        if (settings.Tls) options.WithTlsOptions(tls => tls.UseTls());
         try
         {
-            await mqttClient.ConnectAsync(mqttClientOptions).ConfigureAwait(false);
-        }
-        catch (MQTTnet.Exceptions.MqttClientNotConnectedException ex)
-        {
-            _logger.LogError(ex, "MQTT client not connected after connect attempt. Broker may be rejecting the connection (check protocol version).");
-            _mqttClient = null;
-            mqttClient.Dispose();
-            throw;
-        }
-        catch (MQTTnet.Exceptions.MqttCommunicationException ex)
-        {
-            _logger.LogError(ex, "MQTT connection failed: {Message}. Check broker address, port, and TLS settings.", ex.Message);
-            _mqttClient = null;
-            mqttClient.Dispose();
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "MQTT connection failed unexpectedly: {Type} - {Message}", ex.GetType().Name, ex.Message);
-            _mqttClient = null;
-            mqttClient.Dispose();
-            throw;
-        }
-
-        _lastConfig = config.Clone();
-        _discoveryTopic = config.DiscoveryTopic;
-        _reconnectRequired = false;
-
-        return mqttClient;
-    }
-
-    private void StartReconnectLoop(IMqttClient client)
-    {
-        lock (_reconnectSync)
-        {
-            if (!ReferenceEquals(_mqttClient, client))
+            while (!stoppingToken.IsCancellationRequested)
             {
-                return;
-            }
-
-            if (_reconnectTask != null && !_reconnectTask.IsCompleted)
-            {
-                return;
-            }
-
-            var reconnectTask = Task.Run(() => ReconnectLoopAsync(client));
-            _reconnectTask = reconnectTask;
-
-            reconnectTask.ContinueWith(_ =>
-            {
-                lock (_reconnectSync)
+                if (!client.IsConnected)
                 {
-                    if (ReferenceEquals(_reconnectTask, reconnectTask))
+                    Volatile.Write(ref status, "connecting");
+                    try
                     {
-                        _reconnectTask = null;
+                        await client.ConnectAsync(options.Build(), stoppingToken);
+                        if (settings.TestInputEnabled)
+                        {
+                            // Retain-as-published lets admission reject *all* retained test messages,
+                            // including publications delivered to an already connected subscriber.
+                            var subscription = await client.SubscribeAsync(new MqttClientSubscribeOptionsBuilder()
+                                .WithTopicFilter(filter => filter.WithTopic(TestTopic).WithRetainAsPublished(true))
+                                .Build(), stoppingToken);
+                            if (subscription.Items.Count != 1 || subscription.Items.Any(item => (int)item.ResultCode >= 0x80))
+                                throw new InvalidOperationException("PolterSense test subscription rejected");
+                        }
+                        await client.PublishAsync(new MqttApplicationMessageBuilder().WithTopic(StatusTopic)
+                            .WithPayload("online").WithRetainFlag().Build(), stoppingToken);
+                        Interlocked.Increment(ref connections);
+                        Volatile.Write(ref status, "connected");
+                        logger.LogInformation("PolterSense MQTT connected");
+                    }
+                    catch (Exception) when (!stoppingToken.IsCancellationRequested)
+                    {
+                        Volatile.Write(ref status, "disconnected");
+                        // A successful CONNECT does not imply successful subscription/status setup.
+                        // Tear down partial setup so the next iteration actually retries it.
+                        if (client.IsConnected)
+                        {
+                            using var disconnect = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                            try { await client.DisconnectAsync(new MqttClientDisconnectOptions(), disconnect.Token); }
+                            catch (Exception) { }
+                        }
+                        // Do not log exception text: libraries may embed hosts, credentials or payloads.
+                        logger.LogWarning("PolterSense MQTT unavailable; retrying");
                     }
                 }
-            }, TaskScheduler.Default);
-        }
-    }
-
-    private async Task ReconnectLoopAsync(IMqttClient client)
-    {
-        while (!_reconnectRequired)
-        {
-            if (!ReferenceEquals(_mqttClient, client))
-            {
-                return;
+                await Task.Delay(TimeSpan.FromSeconds(2), time, stoppingToken);
             }
-
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        finally
+        {
+            Volatile.Write(ref status, "disconnected");
             if (client.IsConnected)
             {
-                return;
-            }
-
-            try
-            {
-                await _connectionLock.WaitAsync().ConfigureAwait(false);
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                 try
                 {
-                    if (client.IsConnected)
-                    {
-                        return;
-                    }
-
-                    if (client.Options == null)
-                    {
-                        _logger.LogWarning("MQTT reconnect skipped because client options are not set.");
-                        return;
-                    }
-
-                    _logger.LogInformation("Attempting MQTT reconnect...");
-                    await client.ConnectAsync(client.Options).ConfigureAwait(false);
-                    return;
+                    await client.PublishAsync(new MqttApplicationMessageBuilder().WithTopic(StatusTopic)
+                        .WithPayload("offline").WithRetainFlag().Build(), timeout.Token);
+                    await client.DisconnectAsync(new MqttClientDisconnectOptions(), timeout.Token);
                 }
-                finally
-                {
-                    _connectionLock.Release();
-                }
+                catch (Exception) { /* Last Will remains the fallback; no retained deletion. */ }
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "MQTT reconnect attempt failed, retrying in 30 seconds");
-            }
-
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
-            }
-            catch (TaskCanceledException)
-            {
-                return;
-            }
-        }
-    }
-
-    private async Task EnsureClientConnectedAsync(IMqttClient client)
-    {
-        if (client.IsConnected || _reconnectRequired)
-        {
-            return;
-        }
-
-        await _connectionLock.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            if (client.IsConnected || _reconnectRequired)
-            {
-                return;
-            }
-
-            if (client.Options == null)
-            {
-                _logger.LogWarning("MQTT reconnect skipped because client options are not set.");
-                return;
-            }
-
-            _logger.LogDebug("MQTT client was disconnected when publishing; attempting reconnect.");
-            await client.ConnectAsync(client.Options).ConfigureAwait(false);
-        }
-        finally
-        {
-            _connectionLock.Release();
-        }
-    }
-
-    public async Task WaitForConnectionAsync(CancellationToken cancellationToken = default)
-    {
-        var tcs = _connectionTcs;
-        await tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    public event Func<DeviceSettingsEventArgs, Task>? DeviceConfigReceivedAsync;
-
-    public event Func<DeviceMessageEventArgs, Task>? DeviceMessageReceivedAsync;
-    public event Func<MqttApplicationMessageReceivedEventArgs, Task>? MqttMessageReceivedAsync;
-    public event Func<NodeSettingReceivedEventArgs, Task>? NodeSettingReceivedAsync;
-    public event Func<NodeTelemetryReceivedEventArgs, Task>? NodeTelemetryReceivedAsync;
-    public event Func<NodeTelemetryRemovedEventArgs, Task>? NodeTelemetryRemovedAsync;
-    public event Func<NodeStatusReceivedEventArgs, Task>? NodeStatusReceivedAsync;
-    public event Func<NodeStatusRemovedEventArgs, Task>? NodeStatusRemovedAsync;
-    public event EventHandler? MqttMessageMalformed;
-    public event EventHandler<PreviousDeviceDiscoveredEventArgs>? PreviousDeviceDiscovered;
-    public event Func<DeviceAttributesEventArgs, Task>? DeviceAttributesReceivedAsync;
-
-    private async Task OnMqttMessageReceived(MqttApplicationMessageReceivedEventArgs arg)
-    {
-        var parts = arg.ApplicationMessage.Topic.Split('/');
-        var payload = arg.ApplicationMessage.ConvertPayloadToString();
-
-        try
-        {
-            // Check for Home Assistant discovery messages with configurable topic
-            if (parts.Length == 4 && parts[0] == _discoveryTopic && parts[1] == "device_tracker" && parts[3] == "config")
-            {
-                await ProcessDiscoveryMessage(arg.ApplicationMessage.Topic, payload);
-                return;
-            }
-
-            switch (parts)
-            {
-                case ["espresense", "rooms", _, "telemetry"]:
-                    await ProcessTelemetryMessage(parts[2], payload);
-                    break;
-                case ["espresense", "rooms", _, "status"]:
-                    await ProcessStatusMessage(parts[2], payload);
-                    break;
-                case ["espresense", "rooms", "*", _, "set"]:
-                    await ProcessNodeSettingMessage(parts[2], parts[3], payload);
-                    break;
-                case ["espresense", "rooms", _, _]:
-                    await ProcessNodeSettingMessage(parts[2], parts[3], payload);
-                    break;
-                case ["espresense", "devices", _, _]:
-                    await ProcessDeviceMessage(parts[2], parts[3], payload);
-                    break;
-                case ["espresense", "settings", _, "config"]:
-                    await ProcessDeviceConfigMessage(parts[2], payload);
-                    break;
-                case ["espresense", "companion", _, "attributes"]:
-                    await ProcessDeviceAttributesMessage(parts[2], payload);
-                    break;
-                default:
-                    if (MqttMessageReceivedAsync != null)
-                        await MqttMessageReceivedAsync(arg);
-                    break;
-            }
-        }
-        catch (JsonSerializationException ex)
-        {
-            _logger.LogError(ex, "JSON deserialization error for topic {Topic}. Payload: {Payload}", arg.ApplicationMessage.Topic, payload);
-            MqttMessageMalformed?.Invoke(this, EventArgs.Empty);
-        }
-        catch (MqttMessageProcessingException ex)
-        {
-            _logger.LogError(ex, "Error processing {MessageType} message for topic {Topic}. Payload: {Payload}", ex.MessageType, ex.Topic, ex.Payload);
-            MqttMessageMalformed?.Invoke(this, EventArgs.Empty);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Unexpected error processing message for topic {Topic}. Payload: {Payload}", arg.ApplicationMessage.Topic, payload);
-            MqttMessageMalformed?.Invoke(this, EventArgs.Empty);
-        }
-    }
-
-    private bool ReadOnly => IsReadOnlyClient(_lastConfig?.ClientId ?? _mqttClient?.Options?.ClientId);
-
-    private static bool IsReadOnlyClient(string? clientId)
-    {
-        return clientId?.Contains("read", StringComparison.OrdinalIgnoreCase) ?? false;
-    }
-
-    /// <summary>
-    /// Enqueues an MQTT message for delivery (or logs intent when coordinator is in read-only mode).
-    /// </summary>
-    /// <param name="topic">MQTT topic to publish to.</param>
-    /// <param name="payload">Message payload; may be null to clear retained messages for the topic.</param>
-    /// <param name="retain">If true, the broker will retain the message.</param>
-    /// <returns>A task that completes when the message has been enqueued or the intent has been logged.</returns>
-    /// <exception cref="Exception">Propagates exceptions thrown by the underlying MQTT client when publishing fails.</exception>
-    public virtual async Task EnqueueAsync(string topic, string? payload, bool retain = false)
-    {
-        var client = await GetClient().ConfigureAwait(false);
-
-        if (ReadOnly)
-        {
-            var sanitizedTopic = topic.Replace(Environment.NewLine, "").Replace("\n", "").Replace("\r", "");
-            var sanitizedPayload = payload?.Replace(Environment.NewLine, "").Replace("\n", "").Replace("\r", "");
-            _logger.LogInformation("ReadOnly, would have sent to {Topic}: {Payload}", sanitizedTopic, sanitizedPayload);
-            return;
-        }
-
-        try
-        {
-            await EnsureClientConnectedAsync(client).ConfigureAwait(false);
-            await client.PublishStringAsync(topic, payload, retain: retain).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            var sanitizedTopic = topic.Replace(Environment.NewLine, "").Replace("\n", "").Replace("\r", "");
-            _logger.LogError(ex, "Failed to enqueue MQTT message to {Topic}", sanitizedTopic);
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// Attempts to enqueue an MQTT message for delivery without throwing exceptions.
-    /// Logs errors but returns success/failure status instead of propagating exceptions.
-    /// Use this for best-effort publishes (telemetry, status updates) that shouldn't crash background services.
-    /// </summary>
-    /// <param name="topic">MQTT topic to publish to.</param>
-    /// <param name="payload">Message payload; may be null to clear retained messages for the topic.</param>
-    /// <param name="retain">If true, the broker will retain the message.</param>
-    /// <returns>True if the message was enqueued successfully, false if an error occurred.</returns>
-    public virtual async Task<bool> TryEnqueueAsync(string topic, string? payload, bool retain = false)
-    {
-        try
-        {
-            await EnqueueAsync(topic, payload, retain).ConfigureAwait(false);
-            return true;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception)
-        {
-            // Already logged by EnqueueAsync, just return false
-            // Common causes: DNS resolution failure, network unreachable, broker down
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Clears retained MQTT messages that match a topic filter by subscribing to the filter, collecting the exact topics seen, and republishing each topic with a null payload and retain=true.
-    /// </summary>
-    /// <remarks>
-    /// The method temporarily subscribes to <paramref name="topicFilter"/>, waits briefly to receive retained messages (1 second, cancellable), unsubscribes, and then republishes a null retained message for each distinct topic observed to clear the retained state on the broker.
-    /// </remarks>
-    /// <param name="topicFilter">An MQTT topic filter (may include wildcards) used to discover retained topics to clear.</param>
-    /// <param name="cancellationToken">A token to cancel the waiting period for incoming retained messages.</param>
-    /// <returns>A task that completes when all discovered retained topics have been cleared.</returns>
-    public async Task ClearRetainedAsync(string topicFilter, CancellationToken cancellationToken = default)
-    {
-        var client = await GetClient();
-        var topics = new HashSet<string>();
-
-        Task handler(MqttApplicationMessageReceivedEventArgs arg)
-        {
-            topics.Add(arg.ApplicationMessage.Topic);
-            return Task.CompletedTask;
-        }
-
-        try
-        {
-            client.ApplicationMessageReceivedAsync += handler;
-            await client.SubscribeAsync(topicFilter);
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
-            await client.UnsubscribeAsync(topicFilter);
-
-            foreach (var topic in topics)
-                await EnqueueAsync(topic, null, true);
-
-            var sanitizedPattern = topicFilter.Replace(Environment.NewLine, "").Replace("\n", "").Replace("\r", "");
-            _logger.LogDebug("Cleared {Count} retained messages for pattern {Pattern}", topics.Count, sanitizedPattern);
-        }
-        finally
-        {
-            client.ApplicationMessageReceivedAsync -= handler;
-        }
-    }
-
-    /// <summary>
-    /// Process a telemetry MQTT message for a given node.
-    /// </summary>
-    /// <remarks>
-    /// If <paramref name="payload"/> is null or empty, raises <see cref="NodeTelemetryRemovedAsync"/> (if subscribed) and returns.
-    /// Otherwise deserializes the JSON payload into a <see cref="NodeTelemetry"/> and invokes <see cref="NodeTelemetryReceivedAsync"/> (if subscribed).
-    /// </remarks>
-    /// <param name="nodeId">The identifier of the node the telemetry came from.</param>
-    /// <param name="payload">The telemetry JSON payload; may be null or empty to indicate removal.</param>
-    /// <returns>A task that completes when processing is finished.</returns>
-    /// <exception cref="MqttMessageProcessingException">
-    /// Thrown when deserialization produces null or when JSON parsing fails; includes topic, payload, and message type context.
-    /// </exception>
-    private async Task ProcessTelemetryMessage(string nodeId, string? payload)
-    {
-        if (string.IsNullOrEmpty(payload))
-        {
-            if (NodeTelemetryRemovedAsync != null)
-            {
-                await NodeTelemetryRemovedAsync(new NodeTelemetryRemovedEventArgs
-                {
-                    NodeId = nodeId
-                });
-            }
-            return;
-        }
-
-        if (NodeTelemetryReceivedAsync == null)
-            return;
-
-        try
-        {
-            var telemetry = JsonConvert.DeserializeObject<NodeTelemetry>(payload);
-            if (telemetry == null)
-                throw new MqttMessageProcessingException(
-                    "Telemetry data was null after deserialization",
-                    $"espresense/rooms/{nodeId}/telemetry",
-                    payload,
-                    "Telemetry");
-
-            await NodeTelemetryReceivedAsync(new NodeTelemetryReceivedEventArgs
-            {
-                NodeId = nodeId,
-                Payload = telemetry
-            });
-        }
-        catch (JsonException ex)
-        {
-            throw new MqttMessageProcessingException(
-                "Failed to parse telemetry data",
-                $"espresense/rooms/{nodeId}/telemetry",
-                payload,
-                "Telemetry",
-                ex);
-        }
-    }
-
-    /// <summary>
-    /// Handles an incoming node status MQTT message by raising the appropriate event.
-    /// </summary>
-    /// <remarks>
-    /// If <paramref name="payload"/> is null or empty the method treats this as a cleared retained message and invokes
-    /// <see cref="NodeStatusRemovedAsync"/> (if any handlers are attached) with the node identifier. Otherwise it interprets
-    /// the payload value "online" as an online state and invokes <see cref="NodeStatusReceivedAsync"/> with the resulting state.
-    /// </remarks>
-    /// <param name="nodeId">The identifier of the node the status message pertains to.</param>
-    /// <param name="payload">
-    /// The message payload; null or empty means the retained status was cleared (node removed). A non-empty value is
-    /// interpreted as the node's status (the string "online" maps to true).
-    /// </param>
-    /// <returns>A task representing the asynchronous event dispatch operations.</returns>
-    private async Task ProcessStatusMessage(string nodeId, string? payload)
-    {
-        if (string.IsNullOrEmpty(payload))
-        {
-            // Retained message cleared - node removed
-            if (NodeStatusRemovedAsync != null)
-            {
-                await NodeStatusRemovedAsync(new NodeStatusRemovedEventArgs
-                {
-                    NodeId = nodeId
-                });
-            }
-        }
-        else
-        {
-            // Normal status update
-            if (NodeStatusReceivedAsync != null)
-            {
-                var online = payload == "online";
-                await NodeStatusReceivedAsync(new NodeStatusReceivedEventArgs
-                {
-                    NodeId = nodeId,
-                    Online = online
-                });
-            }
-        }
-    }
-
-    /// <summary>
-    /// Processes an incoming device message payload and invokes the DeviceMessageReceivedAsync handler.
-    /// </summary>
-    /// <remarks>
-    /// If <paramref name="payload"/> is null or empty, or there is no subscriber to <see cref="DeviceMessageReceivedAsync"/>, the method returns without action.
-    /// On successful JSON deserialization the <see cref="DeviceMessageReceivedAsync"/> event is invoked with a <see cref="DeviceMessageEventArgs"/> containing the device and node IDs and the parsed payload.
-    /// </remarks>
-    /// <param name="deviceId">MQTT device identifier from the topic (e.g. the {device} segment).</param>
-    /// <param name="nodeId">MQTT node identifier from the topic (e.g. the {node} segment).</param>
-    /// <param name="payload">JSON payload to deserialize into a <see cref="DeviceMessage"/>; may be null.</param>
-    /// <exception cref="MqttMessageProcessingException">
-    /// Thrown when JSON deserialization fails or results in a null <see cref="DeviceMessage"/>; the exception includes topic, payload and message type context.
-    /// </exception>
-    private async Task ProcessDeviceMessage(string deviceId, string nodeId, string? payload)
-    {
-        if (DeviceMessageReceivedAsync == null || string.IsNullOrEmpty(payload))
-            return;
-
-        try
-        {
-            var deviceMessage = JsonConvert.DeserializeObject<DeviceMessage>(payload ?? "");
-            if (deviceMessage == null)
-                throw new MqttMessageProcessingException("Device message was null after deserialization", $"espresense/devices/{deviceId}/{nodeId}", payload, "DeviceMessage");
-
-            await DeviceMessageReceivedAsync(new DeviceMessageEventArgs
-            {
-                DeviceId = deviceId,
-                NodeId = nodeId,
-                Payload = deviceMessage
-            });
-        }
-        catch (JsonException ex)
-        {
-            throw new MqttMessageProcessingException("Failed to parse device message", $"espresense/devices/{deviceId}/{nodeId}", payload, "DeviceMessage", ex);
-        }
-    }
-
-
-    private async Task ProcessDeviceConfigMessage(string deviceId, string? payload)
-    {
-        try
-        {
-            var deviceSettings = JsonConvert.DeserializeObject<DeviceSettings>(payload ?? "");
-            if (deviceSettings == null)
-                throw new MqttMessageProcessingException("Device settings were null after deserialization", $"espresense/settings/{deviceId}/config", payload, "DeviceConfig");
-
-            deviceSettings.OriginalId = deviceId;
-            if (DeviceConfigReceivedAsync != null)
-                await DeviceConfigReceivedAsync(new DeviceSettingsEventArgs
-                {
-                    DeviceId = deviceId,
-                    Payload = deviceSettings
-                });
-        }
-        catch (JsonException ex)
-        {
-            throw new MqttMessageProcessingException(
-                "Failed to parse device settings",
-                $"espresense/settings/{deviceId}/config",
-                payload,
-                "DeviceConfig",
-                ex);
-        }
-    }
-
-    private async Task ProcessNodeSettingMessage(string nodeId, string setting, string? payload)
-    {
-        if (NodeSettingReceivedAsync == null) return;
-        await NodeSettingReceivedAsync(new NodeSettingReceivedEventArgs
-        {
-            NodeId = nodeId,
-            Setting = setting,
-            Payload = payload
-        });
-    }
-
-    private async Task ProcessDiscoveryMessage(string topic, string? payload)
-    {
-        try
-        {
-            _logger.LogTrace($"Received discovery message on topic: {topic}");
-
-            if (payload == null)
-            {
-                // Null payload indicates deletion of retained message
-                PreviousDeviceDiscovered?.Invoke(this, new PreviousDeviceDiscoveredEventArgs { AutoDiscover = null });
-                return;
-            }
-
-            if (!AutoDiscovery.TryDeserialize(topic, payload, out var msg, _discoveryTopic))
-                throw new MqttMessageProcessingException("Failed to deserialize discovery message", topic, payload, "Discovery");
-
-            PreviousDeviceDiscovered?.Invoke(this, new PreviousDeviceDiscoveredEventArgs { AutoDiscover = msg });
-        }
-        catch (Exception ex) when (ex is not MqttMessageProcessingException)
-        {
-            throw new MqttMessageProcessingException("Error processing discovery message", topic, payload, "Discovery", ex);
-        }
-    }
-
-    private async Task ProcessDeviceAttributesMessage(string deviceId, string? payload)
-    {
-        if (DeviceAttributesReceivedAsync == null) return;
-
-        try
-        {
-            if (string.IsNullOrEmpty(payload))
-                return;
-
-            var attributes = JsonConvert.DeserializeObject<Dictionary<string, object>>(payload);
-            if (attributes == null)
-                throw new MqttMessageProcessingException(
-                    "Device attributes were null after deserialization",
-                    $"espresense/companion/{deviceId}/attributes",
-                    payload,
-                    "DeviceAttributes");
-
-            await DeviceAttributesReceivedAsync(new DeviceAttributesEventArgs
-            {
-                DeviceId = deviceId,
-                Attributes = attributes
-            });
-        }
-        catch (JsonException ex)
-        {
-            throw new MqttMessageProcessingException(
-                "Failed to parse device attributes",
-                $"espresense/companion/{deviceId}/attributes",
-                payload,
-                "DeviceAttributes", ex);
         }
     }
 }

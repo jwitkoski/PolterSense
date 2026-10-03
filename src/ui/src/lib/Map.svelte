@@ -1,157 +1,86 @@
 <script lang="ts">
 	import { isEditableTarget } from './dom';
 	import { LayerCake, Svg } from 'layercake';
-	import { config } from '$lib/stores';
-	import { scaleOrdinal, schemeCategory10 } from 'd3';
+	import { config } from './stores';
 	import { select } from 'd3-selection';
 	import { zoom, zoomIdentity } from 'd3-zoom';
-	import { setContext } from 'svelte';
-	import type { Device, Node } from '$lib/types';
-
 	import Rooms from './Rooms.svelte';
-	import Devices from './Devices.svelte';
-	import Nodes from './Nodes.svelte';
 	import AxisX from './AxisX.svelte';
 	import AxisY from './AxisY.svelte';
 	import MapCoordinates from './MapCoordinates.svelte';
-	import CalibrationSpot from './CalibrationSpot.svelte';
-
+	import InventoryMarkers from './InventoryMarkers.svelte';
+	import { squareBounds } from './geometry';
+	let { floorId, onselect }: { floorId: string; onselect?: (kind: 'wisps' | 'sources', id: string) => void } = $props();
 	let svg: SVGElement | undefined = $state();
 	let transform = $state(zoomIdentity);
-
-	interface Props {
-		floorId?: string | null;
-		deviceId?: string | null;
-		nodeId?: string | null;
-		exclusive?: boolean;
-		calibrate?: boolean;
-		calibrationSpot?: { x: number; y: number } | null;
-		onselected?: ((item: Device | Node) => void) | undefined;
-	}
-
-	let { floorId = $bindable(null), deviceId = $bindable(null), nodeId = $bindable(null), exclusive = false, calibrate = false, calibrationSpot = $bindable(null), onselected = undefined }: Props = $props();
-
-	function makeSquareBounds(bounds: number[][]): number[][] {
-		const maxDim = Math.max(bounds[1][0], bounds[1][1]);
-		return [
-			[bounds[0][0], bounds[0][1], bounds[0][2]],
-			[maxDim, maxDim, bounds[1][2]]
-		];
-	}
-
+	let floor = $derived($config?.floors.find((f) => f.id === floorId));
+	let bounds = $derived(floor ? squareBounds(floor.bounds) : undefined);
 	const handler = zoom<SVGElement, unknown>()
 		.scaleExtent([0.5, 40])
-		.wheelDelta((event) => {
-			// Only zoom if shift key is pressed
-			if (event.shiftKey) {
-				return -(event.deltaY + event.deltaX * 0.25) * 0.002;
-			}
-			// Return 0 to prevent zooming when shift key is not pressed
-			return 0;
-		})
+		.wheelDelta((event) => (event.shiftKey ? -(event.deltaY + event.deltaX * 0.25) * 0.002 : 0))
 		.on('zoom', (e) => {
 			transform = e.transform;
 		});
-
-	function hoveredDevice(device: Device | null) {
-		if (exclusive) return;
-		deviceId = device?.id ?? null;
-	}
-
-	function hoveredNode(node: Node | null) {
-		if (exclusive) return;
-		nodeId = node?.id ?? null;
-	}
-
-	function selectedDevice(device: Device) {
-		onselected?.(device);
-	}
-
-	function selectedNode(node: Node) {
-		onselected?.(node);
-	}
-
 	function handleKeyboard(event: KeyboardEvent) {
 		if (isEditableTarget(event.target)) return;
-		const zoomFactor = event.shiftKey ? 1.005 : 1.1;
-		const translateAmount = event.shiftKey ? 1 : 50;
-		let newTransform = transform;
-
+		const amount = event.shiftKey ? 5 : 50;
+		let next = transform;
 		switch (event.key) {
 			case '0':
-				event.preventDefault();
-				newTransform = zoomIdentity.translate(transform.x, transform.y);
+				next = zoomIdentity;
 				break;
-			case '=':
 			case '+':
-				event.preventDefault();
-				newTransform = transform.scale(zoomFactor);
+			case '=':
+				next = transform.scale(1.1);
 				break;
 			case '-':
-			case '_':
-				event.preventDefault();
-				newTransform = transform.scale(1 / zoomFactor);
+				next = transform.scale(1 / 1.1);
 				break;
 			case 'ArrowLeft':
-				event.preventDefault();
-				newTransform = transform.translate(-translateAmount / transform.k, 0);
+				next = transform.translate(-amount / transform.k, 0);
 				break;
 			case 'ArrowRight':
-				event.preventDefault();
-				newTransform = transform.translate(translateAmount / transform.k, 0);
+				next = transform.translate(amount / transform.k, 0);
 				break;
 			case 'ArrowUp':
-				event.preventDefault();
-				newTransform = transform.translate(0, -translateAmount / transform.k);
+				next = transform.translate(0, -amount / transform.k);
 				break;
 			case 'ArrowDown':
-				event.preventDefault();
-				newTransform = transform.translate(0, translateAmount / transform.k);
+				next = transform.translate(0, amount / transform.k);
 				break;
 		}
-
-		if (svg && newTransform !== transform) {
-			select(svg).call(handler.transform, newTransform);
+		if (svg && next !== transform) {
+			event.preventDefault();
+			select(svg).call(handler.transform, next);
 		}
 	}
-
-	setContext('colors', scaleOrdinal(schemeCategory10));
-
-	function getXRange({ height, width }: { height: number; width: number }) {
-		const min = 0;
-		const max = Math.min(height, width);
-		return $config?.map?.flipX ? [max, min] : [min, max];
+	function reset() {
+		if (svg) select(svg).call(handler.transform, zoomIdentity);
 	}
-
-	function getYRange({ height, width }: { height: number; width: number }) {
-		const min = 0;
-		const max = Math.min(height, width);
-		return $config?.map?.flipY ? [max, min] : [min, max];
+	function range({ height, width }: { height: number; width: number }, flip: boolean) {
+		const size = Math.min(height, width);
+		return flip ? [size, 0] : [0, size];
 	}
-	let floor = $derived($config?.floors.find((f) => f.id === floorId) ?? $config?.floors.find((f) => f != null));
-	let bounds = $derived(floor?.bounds);
-	let squareBounds = $derived(bounds ? makeSquareBounds(bounds) : undefined);
 	$effect(() => {
 		if (svg) select(svg).call(handler);
 	});
+	$effect(() => {
+		void floorId;
+		reset();
+	});
 </script>
 
-<svelte:window onkeydown={handleKeyboard} />
-
-{#if bounds}
-	<LayerCake x="0" y="1" xRange={getXRange} yRange={getYRange} flatData={squareBounds} padding={{ top: 16, left: 16, bottom: 16, right: 16 }}>
-		<Svg bind:element={svg}>
-			<MapCoordinates {transform} />
-			<AxisX {transform} />
-			<AxisY {transform} />
-			<Rooms {transform} {floorId} />
-			<Nodes {transform} {floorId} {deviceId} {nodeId} onselected={selectedNode} onhovered={hoveredNode} />
-			<Devices {transform} {floorId} {deviceId} {exclusive} onselected={selectedDevice} onhovered={hoveredDevice} />
-			{#if calibrate && calibrationSpot}
-				<CalibrationSpot {transform} {bounds} bind:position={calibrationSpot} />
-			{/if}
-		</Svg>
-	</LayerCake>
-{:else}
-	<div>Loading...</div>
-{/if}
+<!-- Keyboard tools are scoped to the focused map, so page and form navigation remain available. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (This focusable map region implements documented keyboard pan/zoom controls.) -->
+<div class="map-canvas" role="region" tabindex="0" aria-label="Floor plan; arrow keys pan, plus and minus zoom, zero resets" onkeydown={handleKeyboard}>
+	{#if bounds}
+		<LayerCake x="0" y="1" xRange={(size: { height: number; width: number }) => range(size, $config?.map.flipX ?? false)} yRange={(size: { height: number; width: number }) => range(size, $config?.map.flipY ?? false)} flatData={bounds} padding={{ top: 34, left: 32, bottom: 32, right: 24 }}>
+			<Svg bind:element={svg}>
+				<AxisX {transform} /><AxisY {transform} /><Rooms {transform} {floorId} />
+				<g transform={transform.toString()}><InventoryMarkers {floorId} {onselect} /></g>
+				<MapCoordinates {transform} />
+			</Svg>
+		</LayerCake>
+	{:else}<div class="empty">No floor configured. Add a floor and room polygons in the YAML editor.</div>{/if}
+</div>
+<button class="reset-map" onclick={reset}>Reset view</button>

@@ -5,37 +5,29 @@
             "label": "build",
             "command": "dotnet",
             "type": "process",
-            "args": [
-                "build",
-                "${workspaceFolder}/ESPresense.Companion.csproj",
-                "/property:GenerateFullPaths=true",
-                "/consoleloggerparameters:NoSummary"
-            ],
+            "args": ["build", "${workspaceFolder}/src/PolterSense.csproj"],
             "problemMatcher": "$msCompile"
         },
         {
             "label": "publish",
             "command": "dotnet",
             "type": "process",
-            "args": [
-                "publish",
-                "${workspaceFolder}/ESPresense.Companion.csproj",
-                "/property:GenerateFullPaths=true",
-                "/consoleloggerparameters:NoSummary"
-            ],
+            "args": ["publish", "${workspaceFolder}/src/PolterSense.csproj", "--configuration", "Release"],
             "problemMatcher": "$msCompile"
         },
         {
             "label": "watch",
             "command": "dotnet",
             "type": "process",
-            "args": [
-                "watch",
-                "run",
-                "--project",
-                "${workspaceFolder}/ESPresense.Companion.csproj"
-            ],
+            "args": ["watch", "--project", "${workspaceFolder}/src/PolterSense.csproj"],
             "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "frontend",
+            "command": "pnpm",
+            "type": "process",
+            "args": ["-C", "${workspaceFolder}/src/ui", "start"],
+            "problemMatcher": []
         }
     ]
 }

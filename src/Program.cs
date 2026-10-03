@@ -1,129 +1,147 @@
-using ESPresense.Extensions;
-using ESPresense.Models;
-using ESPresense.Services;
-using MQTTnet.Diagnostics.Logger;
-using Serilog;
-using Serilog.Events;
-using SQLite;
+using System.Net.WebSockets;
+using System.Text.Json;
 using System.Text.Json.Serialization;
-using ESPresense.Optimizers;
-using ESPresense.Controllers;
-using ESPresense.Utils;
-using Microsoft.AspNetCore.DataProtection;
-using Flurl.Http.Newtonsoft;
-using Flurl.Http;
-using ModelContextProtocol.Server;
+using Microsoft.Extensions.FileProviders;
+using PolterSense.Models;
+using PolterSense.Sensing;
+using PolterSense.Services;
+using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
-
-Log.Logger = new LoggerConfiguration()
-    .WriteTo.Console()
-    .CreateBootstrapLogger();
-
-FlurlHttp.Clients.UseNewtonsoft();
-
 builder.Host.UseSerilog((context, cfg) => cfg.ReadFrom.Configuration(context.Configuration));
-
-Log.Logger.Information(MathNet.Numerics.Control.Describe().Trim('\r', '\n'));
-
-var configDir = Environment.GetEnvironmentVariable("CONFIG_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".espresense");
-var storageDir = Path.Combine(configDir, ".storage");
-Directory.CreateDirectory(storageDir);
-
-var configLoader = new ConfigLoader(configDir);
-
-builder.Services.AddSingleton(a => configLoader);
-builder.Services.AddHostedService(a => configLoader);
-
-builder.Services.AddDataProtection()
-    .UseEphemeralDataProtectionProvider();
-
-builder.Services.AddSingleton(a =>
+builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 512 * 1024);
+var storage = Environment.GetEnvironmentVariable("POLTERSENSE_CONFIG_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".poltersense");
+var demo = Environment.GetEnvironmentVariable("POLTERSENSE_DEMO") == "true";
+builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    SQLitePCL.Batteries.Init();
-    var databasePath = Path.Combine(storageDir, "history.db");
-    Directory.CreateDirectory(Path.GetDirectoryName(databasePath) ?? throw new InvalidOperationException("HOME not found"));
-    var sqLiteConnection = new SQLiteAsyncConnection(databasePath)
-    {
-        Trace = true,
-        Tracer = Log.Debug
-    };
-
-    return sqLiteConnection;
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, false));
+    options.SerializerOptions.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow;
+    options.SerializerOptions.MaxDepth = 32;
 });
-
-builder.Services.AddSingleton<HttpClient>();
-builder.Services.AddSingleton<IMqttNetLogger>(a => new MqttNetLogger());
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton(provider => new ConfigLoader(storage, provider.GetRequiredService<ILogger<ConfigLoader>>()));
+builder.Services.AddHostedService(provider => provider.GetRequiredService<ConfigLoader>());
+builder.Services.AddSingleton<IMedium, NoOpMedium>();
+builder.Services.AddSingleton<IObservationAdapter, NormalizedTestAdapter>();
+builder.Services.AddSingleton<ObservationPipeline>();
+builder.Services.AddHostedService<PipelineHost>();
+builder.Services.AddSingleton(MqttSettings.FromEnvironment(storage));
 builder.Services.AddSingleton<MqttCoordinator>();
-builder.Services.AddSingleton<IMqttCoordinator>(provider => provider.GetRequiredService<MqttCoordinator>());
-builder.Services.AddSingleton<TelemetryService>();
-builder.Services.AddSingleton<GlobalEventDispatcher>();
-builder.Services.AddSingleton<DeviceTracker>();
-builder.Services.AddSingleton<SupervisorConfigLoader>();
-builder.Services.AddSingleton<DeviceHistoryStore>();
-builder.Services.AddSingleton<DeviceSettingsStore>();
-builder.Services.AddSingleton<NodeSettingsStore>();
-builder.Services.AddSingleton<NodeTelemetryStore>();
-builder.Services.AddSingleton<FirmwareTypeStore>();
-builder.Services.AddSingleton<IFirmwareTypeStore>(provider => provider.GetRequiredService<FirmwareTypeStore>());
-builder.Services.AddSingleton<NodeStateMapper>();
-builder.Services.AddSingleton<FirmwareUpdateJobService>();
-builder.Services.AddSingleton<DeviceService>();
-builder.Services.AddSingleton<DeviceCaptureService>();
-builder.Services.AddSingleton<LeaseService>();
-builder.Services.AddSingleton<ILeaseService>(provider => provider.GetRequiredService<LeaseService>());
-
-builder.Services.AddHostedService<MultiScenarioLocator>();
-builder.Services.AddHostedService<OptimizationRunner>();
-builder.Services.AddHostedService(provider => provider.GetRequiredService<DeviceTracker>());
-builder.Services.AddHostedService(provider => provider.GetRequiredService<DeviceSettingsStore>());
-builder.Services.AddHostedService(provider => provider.GetRequiredService<NodeSettingsStore>());
-builder.Services.AddHostedService(provider => provider.GetRequiredService<NodeTelemetryStore>());
-builder.Services.AddHostedService(provider => provider.GetRequiredService<TelemetryService>());
-builder.Services.AddHostedService<DeviceCleanupService>();
-builder.Services.AddSingleton<State>();
-builder.Services.AddControllersWithViews().AddJsonOptions(opt =>
-{
-    opt.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
-    opt.JsonSerializerOptions.NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals;
-});
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<MqttCoordinator>());
+builder.Services.AddSingleton<EchoReplay>();
 builder.Services.AddHealthChecks();
-
-builder.Services.AddMcpServer(options =>
-{
-    options.ServerInfo = new ModelContextProtocol.Protocol.Implementation { Name = "ESPresense.Companion", Version = "1.0.0" };
-})
-    .WithResources<McpResources>()
-    .WithTools<McpResources>()
-    .WithHttpTransport();
-
 var app = builder.Build();
-
-app.UseWebSockets(new WebSocketOptions
+app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
+app.Use(async (context, next) =>
 {
-    KeepAliveInterval = TimeSpan.FromMinutes(15)
+    // Local UI writes must be same-origin; application intentionally has no remote auth service yet.
+    if ((context.Request.Method != "GET" || context.WebSockets.IsWebSocketRequest) && context.Request.Headers.Origin.Count > 0
+        && context.Request.Headers.Origin != $"{context.Request.Scheme}://{context.Request.Host}")
+    { context.Response.StatusCode = 403; return; }
+    try { await next(context); }
+    catch (ConfigConflictException) { await Error(context, 409, "Configuration changed; reload before saving."); }
+    catch (ConfigValidationException) { await Error(context, 400, "Invalid configuration. The last valid scene remains active."); }
+    catch (ObservationException exception) { await Error(context, 400, exception.Code); }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
+    catch (Exception)
+    {
+        app.Logger.LogWarning("PolterSense request failed; details withheld to protect configuration data");
+        await Error(context, 500, "Request failed. Configuration and credentials are not included in errors.");
+    }
 });
-
-app.UseSerilogRequestLogging(o =>
+var staticPath = Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "ui/build"))
+    ? Path.Combine(app.Environment.ContentRootPath, "ui/build") : Path.Combine(app.Environment.ContentRootPath, "wwwroot");
+if (Directory.Exists(staticPath))
 {
-    o.EnrichDiagnosticContext = (dc, ctx) => dc.Set("UserAgent", ctx?.Request.Headers.UserAgent);
-    o.GetLevel = (ctx, ms, ex) => ex != null ? LogEventLevel.Error : ctx.Response.StatusCode > 499 ? LogEventLevel.Error : ms > 500 ? LogEventLevel.Warning : ctx.Request.Path.Value.IndexOf("/state", StringComparison.OrdinalIgnoreCase) > 0 ? LogEventLevel.Verbose : LogEventLevel.Debug;
-});
-
-app.UseSwagger(c => c.RouteTemplate = "api/swagger/{documentName}/swagger.{json|yaml}");
-app.UseSwaggerUI(c => c.RoutePrefix = "api/swagger");
-
-app.UseStaticFiles();
-app.UseRouting();
-app.MapMcp("/api/mcp");
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = new PhysicalFileProvider(staticPath) });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = new PhysicalFileProvider(staticPath) });
+}
 app.MapHealthChecks("/healthz");
-
-app.MapControllerRoute(
-    name: "default",
-    pattern: "{controller}/{action=Index}/{id?}");
-
-app.MapFallbackToFile("index.html");
-
+app.MapGet("/api/config", (ConfigLoader config) => ConfigView(config));
+app.MapPut("/api/config", async (ConfigEdit edit, ConfigLoader config, CancellationToken ct) =>
+{
+    await config.UpdateAsync(edit.Config, edit.Revision, ct);
+    return ConfigView(config);
+});
+app.MapPut("/api/config/yaml", async (YamlEdit edit, ConfigLoader config, CancellationToken ct) =>
+{
+    await config.UpdateYamlAsync(edit.Yaml, edit.Revision, ct);
+    return ConfigView(config);
+});
+app.MapGet("/api/state", (ConfigLoader config, ObservationPipeline pipeline, MqttCoordinator mqtt) => State(config, pipeline, mqtt, demo));
+app.MapGet("/api/adapters", (IObservationAdapter adapter) => new[] { adapter.Capabilities });
+app.MapPost("/api/demo/replay", async (EchoReplay replay, ObservationPipeline pipeline, TimeProvider time, CancellationToken ct) =>
+{
+    if (!demo) return Results.NotFound();
+    var path = Path.Combine(AppContext.BaseDirectory, "fixtures", "synthetic-echo.json");
+    return Results.Ok(await replay.RunAsync(path, pipeline, time, ct));
+});
+// No per-sample broadcasting or unbounded per-browser queue. Slow sockets time out.
+app.Map("/ws", async (HttpContext context, ConfigLoader config, ObservationPipeline pipeline, MqttCoordinator mqtt) =>
+{
+    if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
+    using var socket = await context.WebSockets.AcceptWebSocketAsync();
+    using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, app.Lifetime.ApplicationStopping);
+    var receive = ObserveClose(socket, lifetime);
+    try
+    {
+        while (!lifetime.IsCancellationRequested && socket.State == WebSocketState.Open)
+        {
+            using var send = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            send.CancelAfter(TimeSpan.FromSeconds(5));
+            await socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(State(config, pipeline, mqtt, demo), ContractJson.Options), WebSocketMessageType.Text, true, send.Token);
+            await Task.Delay(1000, lifetime.Token);
+        }
+    }
+    catch (Exception) when (socket.State != WebSocketState.Open || lifetime.IsCancellationRequested) { }
+    catch (WebSocketException) { }
+    catch (OperationCanceledException) { }
+    finally { lifetime.Cancel(); await receive; }
+});
+// Removed APIs remain 404 rather than being routed to the SPA.
+app.MapFallback((HttpContext context) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api") || !File.Exists(Path.Combine(staticPath, "index.html"))) return Results.NotFound();
+    return Results.File(Path.Combine(staticPath, "index.html"), "text/html");
+});
 app.Run();
+
+static object ConfigView(ConfigLoader loader)
+{
+    return loader.GetView();
+}
+static object State(ConfigLoader config, ObservationPipeline pipeline, MqttCoordinator mqtt, bool demoEnabled)
+{
+    var current = config.Current;
+    var snapshot = pipeline.Snapshot(current);
+    return new { SchemaVersion = 1, ConfigRevision = current.Revision, ConfigurationError = config.Error,
+        Mqtt = mqtt.Snapshot(), snapshot.Diagnostics, snapshot.Medium, DemoEnabled = demoEnabled };
+}
+static async Task Error(HttpContext context, int code, string message)
+{
+    if (context.Response.HasStarted) return;
+    context.Response.StatusCode = code;
+    await context.Response.WriteAsJsonAsync(new { Error = message });
+}
+static async Task ObserveClose(WebSocket socket, CancellationTokenSource lifetime)
+{
+    try
+    {
+        var buffer = new byte[128];
+        while (!lifetime.IsCancellationRequested)
+        {
+            var received = await socket.ReceiveAsync(buffer.AsMemory(), lifetime.Token);
+            if (received.MessageType == WebSocketMessageType.Close) break;
+            // Server-only feed; unexpected client data is not a command API.
+            if (received.Count > 0) break;
+        }
+    }
+    catch (Exception) { }
+    finally { lifetime.Cancel(); }
+}
+public record ConfigEdit(string Revision, Config Config);
+public record YamlEdit(string Revision, string Yaml);
+public sealed class PipelineHost(ObservationPipeline pipeline) : BackgroundService
+{
+    protected override Task ExecuteAsync(CancellationToken stoppingToken) => pipeline.RunAsync(stoppingToken);
+}

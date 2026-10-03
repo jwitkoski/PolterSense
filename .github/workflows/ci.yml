@@ -1,77 +1,78 @@
-name: Build and test
+name: PolterSense validation
 
 on:
+  push:
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-
+  docker-demo:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     steps:
-    - uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
+      - uses: actions/checkout@v7
+      - name: Exercise default demo without host build tools
+        run: python3 scripts/test-demo.py
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v7
-      with:
-        node-version: 22
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+          run_install: false
+      - name: Restore and build backend
+        run: |
+          dotnet restore
+          dotnet build --configuration Release --no-restore
+      - name: Test backend
+        run: dotnet test --configuration Release --no-build
+      - name: Install frontend dependencies
+        run: pnpm -C src/ui install --frozen-lockfile
+      - name: Check frontend types and style
+        run: |
+          pnpm -C src/ui check
+          pnpm -C src/ui lint
+      - name: Test and build frontend
+        run: |
+          pnpm -C src/ui test:unit --run
+          pnpm -C src/ui build
+      - name: Install isolated browser test dependencies
+        run: pnpm -C src/ui exec playwright install --with-deps chromium
+      - name: Smoke-test frontend
+        run: pnpm -C src/ui test
 
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v6
-      with:
-        dotnet-version: 8.0.x
-
-    - uses: pnpm/action-setup@v6
-      name: Install pnpm
-      with:
-        version: 10
-        run_install: false
-
-    - name: Configure pnpm store path
-      run: pnpm config set store-dir ~/.pnpm-store
-
-    - name: Setup pnpm cache
-      uses: actions/cache@v6
-      with:
-        path: ~/.pnpm-store
-        key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-        restore-keys: |
-          ${{ runner.os }}-pnpm-store-
-  
-    - name: Restore dependencies
-      run: dotnet restore
-
-    - name: Build
-      run: dotnet build -c Release --no-restore
-
-    - name: Test backend
-      run: dotnet test -c Release --no-build --verbosity normal --filter "Category!=LongRunning"
-
-    - name: Install frontend dependencies
-      run: pnpm -C src/ui install --frozen-lockfile
-
-    - name: Type check frontend
-      run: pnpm -C src/ui check
-
-    - name: Lint frontend
-      run: pnpm -C src/ui lint
-
-    - name: Unit test frontend
-      run: pnpm -C src/ui test:unit -- --run
-
-    - name: Cache Playwright browsers
-      uses: actions/cache@v6
-      with:
-        path: ~/.cache/ms-playwright
-        key: ${{ runner.os }}-playwright-${{ hashFiles('src/ui/pnpm-lock.yaml') }}
-        restore-keys: |
-          ${{ runner.os }}-playwright-
-
-    - name: Install Playwright
-      run: pnpm -C src/ui exec playwright install --with-deps
-
-    - name: Test frontend
-      run: pnpm -C src/ui test
+  modern-pnpm-install:
+    # A fresh store catches build-approval policy changes hidden by cached installs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 12.8.1
+          run_install: false
+      - name: Install and build with current pnpm policy
+        run: |
+          pnpm -C src/ui install --frozen-lockfile --store-dir "${RUNNER_TEMP}/poltersense-pnpm12-store"
+          pnpm -C src/ui build

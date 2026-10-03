@@ -1,23 +1,11 @@
-import type { PlaywrightTestConfig } from '@playwright/test';
-
-const config: PlaywrightTestConfig = {
-	// The preview server serves a >500kB bundle to every worker at once, so the default
-	// 5s assertion timeout can lapse on a loaded machine before the first paint.
-	expect: { timeout: 15000 },
-	use: {
-		baseURL: 'http://localhost:4173',
-		launchOptions: {
-			args: ['--use-angle=swiftshader']
-		}
-	},
-	webServer: {
-		command: 'pnpm run build && pnpm run preview -- --port 4173',
-		url: 'http://localhost:4173',
-		timeout: 60000,
-		reuseExistingServer: !process.env.CI
-	},
+import { defineConfig } from '@playwright/test';
+const baseURL = process.env.POLTERSENSE_E2E_URL;
+export default defineConfig({
 	testDir: './tests',
-	testMatch: '**/*.spec.ts'
-};
-
-export default config;
+	timeout: 60000,
+	testMatch: '**/*.spec.ts',
+	workers: 1,
+	expect: { timeout: 10000 },
+	use: { baseURL: baseURL ?? 'http://127.0.0.1:4173', launchOptions: { executablePath: process.env.POLTERSENSE_CHROME, args: ['--no-sandbox'] } },
+	webServer: baseURL ? undefined : { command: 'pnpm run preview --host 127.0.0.1 --port 4173', url: 'http://127.0.0.1:4173', timeout: 30000, reuseExistingServer: false }
+});

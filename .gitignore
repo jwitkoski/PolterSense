@@ -241,3 +241,9 @@ test-results
 
 # Oh My ClaudeCode
 .omc/
+
+# Local PolterSense configuration and transport identity
+.poltersense/
+**/config.yaml
+**/config.last-valid.yaml
+**/instance-id

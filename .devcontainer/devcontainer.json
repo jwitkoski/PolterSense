@@ -1,11 +1,11 @@
 {
+    "name": "PolterSense",
     "image": "mcr.microsoft.com/devcontainers/dotnet:8.0-bookworm",
-    "forwardPorts": [
-        5279
-    ],
+    "forwardPorts": [5279, 5173],
     "features": {
         "ghcr.io/devcontainers/features/node:1": {
-            "version": "20"
+            "version": "22"
         }
-    }
+    },
+    "postCreateCommand": "npm install --global pnpm@10 && pnpm -C src/ui install --frozen-lockfile"
 }

@@ -50,7 +50,7 @@
 	}
 
 	function handleKeydown(event: KeyboardEvent) {
-		if (isEditableTarget(event.target)) return;
+		if (isEditableTarget(event.target) || !(event.target instanceof Element) || !event.target.closest('.map-canvas')) return;
 		// Check for Ctrl/Cmd + C
 		if ((event.ctrlKey || event.metaKey) && event.key === 'c') {
 			event.preventDefault();
@@ -93,7 +93,7 @@
 <svelte:window onmousemove={updateCoordinates} onkeydown={handleKeydown} onblur={handleFocusOut} />
 
 <g transform="translate({$width - 120}, {$height - 40})">
-	<rect width="110" height="30" rx="4" fill="#2563eb" class="shadow-lg" />
+	<rect width="110" height="30" rx="4" fill="#284d49" />
 	<text x="55" y="19" text-anchor="middle" fill="white" font-size="12">
 		X: {Math.round(cursorX * 10) / 10}, Y: {Math.round(cursorY * 10) / 10}
 	</text>
