@@ -43,7 +43,7 @@
 				} else {
 					if (point.some((value) => !Number.isFinite(value))) throw new Error('All three coordinates must be numbers in meters.');
 					if (kind === 'wisps') {
-						const item: Wisp = { id: id.trim(), name: name.trim(), externalId: optional(externalId), point: [...point], floors: [...floors], orientation: placed?.orientation };
+						const item: Wisp = { id: id.trim(), name: name.trim(), externalId: optional(externalId), directHttp: (original as Wisp | undefined)?.directHttp, point: [...point], floors: [...floors], orientation: placed?.orientation };
 						config.wisps = itemId ? config.wisps.map((old) => (old.id === itemId ? item : old)) : [...config.wisps, item];
 					} else {
 						const item: Source = { id: id.trim(), name: name.trim(), apLabel: optional(apLabel), radioId: optional(radioId), bssid: optional(bssid), channel: channel, point: [...point], floors: [...floors], orientation: placed?.orientation };

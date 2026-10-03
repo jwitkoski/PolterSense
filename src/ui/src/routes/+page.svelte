@@ -3,13 +3,14 @@
 	import Map from '$lib/Map.svelte';
 	import BackgroundUpload from '$lib/BackgroundUpload.svelte';
 	import InventoryEditor from '$lib/InventoryEditor.svelte';
+	import EspectrePanel from '$lib/EspectrePanel.svelte';
 	import { config } from '$lib/stores';
 	import { loadConfig, request, saveYaml } from '$lib/api';
 	import type { AppState, ConfigResponse } from '$lib/types';
 	let scene: ConfigResponse | null = $state(null);
 	let runtime: AppState | null = $state(null);
 	let floorId = $state('');
-	let tab: 'inventory' | 'diagnostics' | 'configuration' = $state('inventory');
+	let tab: 'inventory' | 'hardware' | 'diagnostics' | 'configuration' = $state('inventory');
 	let error = $state('');
 	let feed = $state('Connecting');
 	let yaml = $state('');
@@ -181,7 +182,7 @@
 		</section>
 		<section class="details-panel">
 			<nav class="tabs" aria-label="Scene tools">
-				{#each ['inventory', 'diagnostics', 'configuration'] as item}<button class:selected={tab === item} onclick={() => (tab = item as typeof tab)}>{item === 'configuration' ? 'YAML' : item[0].toUpperCase() + item.slice(1)}</button>{/each}
+				{#each ['inventory', 'hardware', 'diagnostics', 'configuration'] as item}<button class:selected={tab === item} onclick={() => (tab = item as typeof tab)}>{item === 'configuration' ? 'YAML' : item === 'hardware' ? 'Wisp setup' : item[0].toUpperCase() + item.slice(1)}</button>{/each}
 			</nav>
 			{#if tab === 'inventory'}
 				{#if selection && scene}{#key selection.key}<InventoryEditor {scene} kind={selection.kind} itemId={selection.id} onclose={() => (selection = null)} onsaved={accept} />{/key}{:else}
@@ -203,9 +204,11 @@
 								{:else}<p class="empty-small">No {kind === 'links' ? 'sensing links' : kind} configured.</p>{/each}
 							</div>
 						{/each}
-						<p class="muted">Receiver management is local inventory only. Firmware control and OTA are unavailable.</p>
+						<p class="muted">Inventory edits stay local. Use Wisp setup for supported ESPectre device settings. OTA is unavailable.</p>
 					</div>
 				{/if}
+			{:else if tab === 'hardware'}
+				{#if scene}<EspectrePanel {scene} onsaved={accept} />{/if}
 			{:else if tab === 'diagnostics'}
 				<div class="panel diagnostics">
 					<p class="eyebrow">OBSERVATION HEALTH</p>
@@ -285,3 +288,9 @@
 	</div>
 	<footer><span>PolterSense · experimental foundation</span><span>Scene revision <code>{scene?.revision.slice(0, 12) ?? 'unavailable'}</code></span><span>Built on ESPresense Companion infrastructure</span></footer>
 </div>
+
+<style>
+	.tabs {
+		flex-wrap: wrap;
+	}
+</style>

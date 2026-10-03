@@ -92,3 +92,26 @@ The default loopback binding cannot serve a phone connecting to the host LAN add
 - Invalid address/port suffix/out-of-range octet/leading-zero cases returned exit2 before building. Bash syntax and `git diff --check` passed.
 
 The LAN test connected from the host to its LAN address; it does not establish reachability from the owner's phone or across network VLANs. Existing user demo containers were not stopped or modified. Restart the running script with the explicit binding to apply it.
+
+## ESPectre discovery and settings — 2026-10-03
+
+Foundation commit: `ad91fdb` on main. Feature validation on `codex/espectre-discovery`. Native hardware endpoint was explicitly supplied by the owner; requests used the documented Direct port62587 and Origin. `/device`, `/capabilities`, `/sensing` and `/devices` returned protocol1.0, firmware3.0.0-rc3, ESP32-S3 and supported label/sensing operations. An initial port80 probe refused connection; the documented Direct port succeeded.
+
+| Command/check | Result |
+|---|---|
+| `dotnet build --no-restore` | Pass,0 warnings/errors |
+| `dotnet test --no-restore` |111 passed,1 disposable-broker test skipped; includes53 new ESPectre tests |
+| `pnpm -C src/ui check` |0 errors/warnings |
+| `pnpm -C src/ui lint` | Pass |
+| `pnpm -C src/ui test:unit --run` |6 passed |
+| `pnpm -C src/ui build` | Pass |
+| `POLTERSENSE_CHROME=/opt/google/chrome/chrome pnpm -C src/ui test` |7 passed; four new management tests mock every device operation |
+| `python3 scripts/test-demo.py` | Fresh local image built; no-host-SDK startup, scene/replay, binding and cleanup passed |
+| `POLTERSENSE_E2E_URL=http://127.0.0.1:32772 POLTERSENSE_CHROME=/opt/google/chrome/chrome pnpm -C src/ui test` |7 passed against updated isolated container; management write tests still intercept all requests |
+| `/tmp/poltersense-espectre-smoke.py` | Real backend discovers/reads authorized board; local temporary scene mapping; mock firmware HTTP server verifies label/sensing PATCH plus readback; real settings unchanged |
+| `/tmp/poltersense-espectre-browser.cjs` |390px mobile viewport against container: real discovery, local mapping, enabled capability controls and refresh passed; all physical-device PATCH attempts blocked; none occurred |
+| `git diff --check` | Clean |
+
+Native checks used the temporary SDK/Node/pnpm paths recorded above; the demo needed only Docker. Browser runs needed sandbox escalation as before. Logs: `/tmp/poltersense-espectre-{build,tests,demo,container-browser}.log`; mobile screenshot: `/tmp/poltersense-espectre-mobile.png`. A mock HTTP integration check first exposed chunked request framing from JsonContent; the adapter now emits a bounded Content-Length body via StringContent, covered by a regression assertion, and the complete mock write/readback test passed. Initial new component/selector test setup failures were resolved by using the existing Playwright workflow, without modifying global Vitest configuration.
+
+The board's label and configured sensing fields were read before/after and remained equal. Readiness is a live receiver property and can fluctuate; it is never reported as room occupancy. Real firmware PATCH behavior remains untested deliberately; UI/backend write behavior is established with mocks, not a claim of hardware mutation validation. Multicast parser/bootstrap behavior has bounded unit coverage; actual discovery from this host used a seed IP and the receiver's nearby-device scan. Cross-VLAN automatic multicast availability is not established. No new motion ingestion or sensing-accuracy validation occurred. Prior MQTT integration remains valid for unchanged transport code; its disposable harness was not rerun in this feature pass.

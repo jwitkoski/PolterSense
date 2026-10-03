@@ -8,7 +8,7 @@ PolterSense is an ASP.NET Core/.NET8 + SvelteKit application extracted from ESPr
 - Application: PolterSense; owned package/topic slug: poltersense. Receiver: Wisp (`wisps`); radio: Source (`sources`); relationship: SensingLink (`links`); estimator: Medium; recording: EchoSession.
 - Observations concern radio propagation/source–receiver links. Never manufacture BLE devices, ranges or identities to fit them. Receiver floor/room placement does not locate motion.
 - Medium is currently a no-op. Missing/stale/disconnected input is not vacancy. Unknown class and absent tracks/positions are valid. A track ID is anonymous trajectory continuity, not personal identity.
-- ESPectre wire names/IDs/capabilities belong to that external protocol. Preserve them in future adapters; application naming does not authorize firmware renaming. No live adapter, OTA/control, HA entity publishing, MCP, optimizers or scheduler exist now.
+- ESPectre wire names/IDs/capabilities belong to that external protocol. Preserve them in future adapters; application naming does not authorize firmware renaming. Direct HTTP discovery and explicit label/sensing controls are implemented in `src/Espectre/`. No live observation ingestion, OTA, Wi-Fi/MQTT provisioning, HA entity publishing, MCP, optimizers or scheduler exists now.
 
 ## Owning components
 
@@ -16,6 +16,7 @@ PolterSense is an ASP.NET Core/.NET8 + SvelteKit application extracted from ESPr
 - `src/Models/Config*`, `src/Services/ConfigLoader.cs`: authoritative bounded/versioned scene validation, snapshot hashing, safe persistence, live refresh. GUI/YAML share this service. Credentials must remain outside scenes and public error details.
 - `src/Sensing/`: transport-independent adapter, normalized observations, bounded admission, no-op Medium, deterministic Echo replay. Preserve timing uncertainty, configured-versus-observed metadata and synthetic provenance.
 - `src/Services/MqttCoordinator.cs`: optional transport, PolterSense-only test namespace/status, verified TLS, reconnect and retained rejection. Do not restore Companion topic subscriptions, trackers, clearing or controls.
+- `src/Espectre/`: bounded mDNS bootstrap, peer discovery and Direct HTTP management. Verify advertised operation method/path and saved external identity before writes; require readback. No arbitrary URL proxy or automatic device writes.
 - `src/ui/`: SvelteKit, retained LayerCake/D3 geometry tools, inventory editors and summarized diagnostics.
 - `fixtures/synthetic-echo.json`: fictional immutable recorded scene and matching revision. Changing the scene requires deliberately regenerating its hash through ConfigLoader.Snapshot, not reinterpreting old observations with current geometry.
 

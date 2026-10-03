@@ -43,6 +43,9 @@ public sealed class Wisp
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
     public string? ExternalId { get; set; }
+    // Omit absent connections to preserve recorded scene hashes from before live adapters.
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public WispConnection? DirectHttp { get; set; }
     public double[] Point { get; set; } = [];
     public string[] Floors { get; set; } = [];
     public double[]? Orientation { get; set; }

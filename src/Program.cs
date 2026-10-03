@@ -5,6 +5,7 @@ using Microsoft.Extensions.FileProviders;
 using PolterSense.Models;
 using PolterSense.Sensing;
 using PolterSense.Services;
+using PolterSense.Espectre;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -29,6 +30,9 @@ builder.Services.AddSingleton(MqttSettings.FromEnvironment(storage));
 builder.Services.AddSingleton<MqttCoordinator>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<MqttCoordinator>());
 builder.Services.AddSingleton<EchoReplay>();
+builder.Services.AddSingleton(provider => new EspectreClient(EspectreClient.CreateHttpClient(), provider.GetRequiredService<TimeProvider>()));
+builder.Services.AddSingleton<IEspectreBootstrap, MdnsBootstrap>();
+builder.Services.AddSingleton<WispManagement>();
 builder.Services.AddHealthChecks();
 var app = builder.Build();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
@@ -42,6 +46,17 @@ app.Use(async (context, next) =>
     catch (ConfigConflictException) { await Error(context, 409, "Configuration changed; reload before saving."); }
     catch (ConfigValidationException) { await Error(context, 400, "Invalid configuration. The last valid scene remains active."); }
     catch (ObservationException exception) { await Error(context, 400, exception.Code); }
+    catch (EspectreException exception)
+    {
+        var status = exception.Code switch
+        {
+            "busy" or "device_busy" or "identity_mismatch" => 409,
+            "unconfigured_wisp" or "unsupported_operation" => 404,
+            "invalid_edit" => 400,
+            _ => 502
+        };
+        await Error(context, status, exception.Code);
+    }
     catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
     catch (Exception)
     {
@@ -70,6 +85,9 @@ app.MapPut("/api/config/yaml", async (YamlEdit edit, ConfigLoader config, Cancel
 });
 app.MapGet("/api/state", (ConfigLoader config, ObservationPipeline pipeline, MqttCoordinator mqtt) => State(config, pipeline, mqtt, demo));
 app.MapGet("/api/adapters", (IObservationAdapter adapter) => new[] { adapter.Capabilities });
+app.MapPost("/api/wisps/discover", (DiscoveryRequest request, WispManagement management, CancellationToken ct) => management.DiscoverAsync(request, ct));
+app.MapGet("/api/wisps/{id}/espectre", (string id, WispManagement management, CancellationToken ct) => management.ReadAsync(id, ct));
+app.MapPatch("/api/wisps/{id}/espectre", (string id, DeviceEdit edit, WispManagement management, CancellationToken ct) => management.ApplyAsync(id, edit, ct));
 app.MapPost("/api/demo/replay", async (EchoReplay replay, ObservationPipeline pipeline, TimeProvider time, CancellationToken ct) =>
 {
     if (!demo) return Results.NotFound();

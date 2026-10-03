@@ -41,7 +41,15 @@ public static class ConfigValidation
         foreach (var wisp in config.Wisps)
         {
             Text(wisp.Name); OptionalText(wisp.ExternalId); Placement(wisp.Point, wisp.Floors, wisp.Orientation, floorIds);
+            if (wisp.DirectHttp != null)
+            {
+                wisp.DirectHttp.Validate();
+                Require(wisp.ExternalId != null && Regex.IsMatch(wisp.ExternalId, "^[a-f0-9]{16}$"), "Direct HTTP requires the reported ESPectre device ID.");
+            }
         }
+        var managed = config.Wisps.Where(w => w.DirectHttp != null).ToArray();
+        Require(managed.Select(w => w.ExternalId).Distinct().Count() == managed.Length, "An ESPectre receiver can be assigned to only one Wisp.");
+        Require(managed.Select(w => (w.DirectHttp!.Address, w.DirectHttp.Port)).Distinct().Count() == managed.Length, "A Direct HTTP endpoint can be assigned to only one Wisp.");
         foreach (var source in config.Sources)
         {
             Text(source.Name); OptionalText(source.ApLabel); OptionalText(source.RadioId);

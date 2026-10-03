@@ -2,7 +2,7 @@
 
 A local Wi-Fi sensing application foundation, derived from [ESPresense Companion](https://github.com/ESPresense/ESPresense-companion). ASP.NET Core and Svelte retain the useful map, configuration, UI and transport infrastructure while replacing the BLE measurement model.
 
-**Implemented now:** multifloor geometry, rooms, Wisp receiver and Source radio inventory, sensing-link assignments, validated live YAML/GUI configuration, REST/WebSocket summaries, isolated optional MQTT, typed observation admission, synthetic Echo replay and an explicitly unimplemented Medium.
+**Implemented now:** multifloor geometry, rooms, Wisp receiver and Source radio inventory, sensing-link assignments, validated live YAML/GUI configuration, REST/WebSocket summaries, isolated optional MQTT, typed observation admission, synthetic Echo replay and an explicitly unimplemented Medium, plus ESPectre discovery and capability-checked receiver settings.
 
 **Future intent:** validated motion/occupancy estimates, spatial likelihoods, anonymous entity tracks across rooms/floors, potentially pet/person distinctions, and deliberate experiment/calibration workflows. None of these sensing capabilities is implemented or established by the synthetic demo. Unknown entity class remains valid. An anonymous track is not a person's identity.
 
@@ -38,6 +38,16 @@ dotnet run --project src
 
 Default storage is `~/.poltersense`; override with `POLTERSENSE_CONFIG_DIR`. A new installation has zero Wisps, no MQTT broker and no estimator. Health is `/healthz`, scene is `/api/config`, summarized diagnostics are `/api/state`, and WebSocket summaries are `/ws`. The backend serves the built UI; separate Vite development is documented in [BUILDING.md](BUILDING.md).
 
+## Discover and configure an ESPectre Wisp
+
+Open **Wisp setup**. It performs one read-only discovery pass using ESPectre's mDNS bootstrap and saved receiver endpoints. **Discover receivers** repeats it. Docker bridge networks and VLANs may block multicast: enter a known receiver IPv4 address and leave the Direct HTTP port at **62587**, then select **Discover by address**. The receiver browses its own subnet and PolterSense verifies each candidate's identity and capabilities over HTTP. No subnet sweep or MQTT broker is needed.
+
+Select a candidate, then map it to an existing Wisp or create one with an explicit display name, stable ID and placement. Discovery cannot determine coordinates. This saves `external_id` and `direct_http: {address, port}` through the normal YAML configuration service. Local Wisp names stay independent of firmware labels. Rediscovery can update a changed address without changing Wisp identity or geometry.
+
+For a mapped receiver, **Read** / **Refresh device** loads current firmware and sensing state. Separate **Apply label to device** and **Apply sensing to device** buttons send real settings only after an explicit action. Controls require advertised support; the server rechecks capabilities and identity, validates fields, and requires matching readback before confirming success. A timeout can leave a change applied but unconfirmed: refresh before retrying. These operations are available in demo mode only through the same explicit user actions; synthetic replay itself never touches hardware.
+
+Supported settings: firmware label, sensing enabled, detector, threshold, motion-on/off hit counts and traffic mode. This is a management connection, **not yet live observation ingestion**. OTA, reboot, raw CSI, Wi-Fi/AP changes, MQTT credentials and recalibration controls remain outside this implementation. Endpoints are restricted to RFC1918 IPv4 addresses; Direct HTTP is unauthenticated and intended for a trusted LAN. No firmware or router modification is needed.
+
 ## Geometry and configuration
 
 Scene schema 1 uses one building-wide Cartesian frame in **meters**, with absolute x/y/z. Floor bounds are `[[minX,minY,minZ],[maxX,maxY,maxZ]]`; elevation is absolute z; room polygons retain `points: [[x,y], ...]`. A Wisp 1.5 m above a floor at z=3 has z=4.5. IDs are explicit and independent of display names. Floor membership is metadata, not radio coverage or the location of observed motion. Optional orientation is `[yaw,pitch,roll]` in degrees; no propagation simulation uses it.
@@ -52,7 +62,7 @@ No Companion configuration is loaded or migrated. To copy geometry deliberately,
 
 MQTT is disabled unless `POLTERSENSE_MQTT_HOST` is set. Optional settings: `POLTERSENSE_MQTT_PORT` (default1883), `POLTERSENSE_MQTT_TLS=true`, `POLTERSENSE_MQTT_USERNAME`, `POLTERSENSE_MQTT_PASSWORD`. Credentials are environment-only and never enter public scene snapshots/revisions. TLS uses normal certificate/hostname verification. Failed connections retry without preventing map/API use.
 
-Each storage directory persists a random `instance-id`; client ID is `poltersense-<instance-id>`, status/Last Will is `poltersense/<instance-id>/status`. There are no device commands, legacy topics, retained deletion or Home Assistant entity publications. Real device adapters are not implemented.
+Each storage directory persists a random `instance-id`; client ID is `poltersense-<instance-id>`, status/Last Will is `poltersense/<instance-id>/status`. There are no device commands, legacy topics, retained deletion or Home Assistant entity publications. Real observation adapters are not implemented; the separate Direct HTTP management adapter does not subscribe to motion.
 
 `POLTERSENSE_TEST_INPUT=true` explicitly enables **our normalized synthetic test protocol** at `poltersense/<instance-id>/test/observations`; `/api/state` reports the exact topic. This is not an ESPectre-compatible feed. See [protocols](docs/protocols.md) for the strict envelope. `./scripts/test-mqtt.sh` creates a disposable loopback-only Mosquitto broker, runs the real transport test and removes its test container/resources.
 

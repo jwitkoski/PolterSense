@@ -26,6 +26,7 @@ export interface Wisp {
 	id: string;
 	name: string;
 	externalId?: string | null;
+	directHttp?: { address: string; port: number } | null;
 	point: Point;
 	floors: string[];
 	orientation?: Point | null;
@@ -84,4 +85,24 @@ export interface AppState {
 	diagnostics: { accepted: number; rejected: number; dropped: number; stale: number; duplicate: number; outOfOrder: number; retained: number; lastRejection?: string | null; lastReceivedAt?: string | null; latest: MotionDiagnostic[] };
 	medium: { schemaVersion: number; availability: string; inputHealth: string; rooms: { roomId: string; state: string }[]; tracks: null };
 	demoEnabled: boolean;
+}
+
+export interface EspectreSnapshot {
+	address: string;
+	port: number;
+	device: { deviceId: string; name: string; label: string | null; frontend: string; firmware: string; chip: string };
+	capabilities: { protocolVersion: string; canUpdateDevice: boolean; canUpdateSensing: boolean };
+	sensing: { enabled: boolean; ready: boolean; calibrating: boolean; mode: string; derivedEventsPaused: boolean; detector: string; threshold: number; motionOnHits: number; motionOffHits: number; trafficGeneratorMode: string } | null;
+	readAt: string;
+}
+export interface EspectreDiscovery {
+	candidates: EspectreSnapshot[];
+	status: string;
+	message: string;
+}
+export interface EspectreUpdate {
+	confirmed: boolean;
+	code: string;
+	message: string;
+	snapshot: EspectreSnapshot | null;
 }
